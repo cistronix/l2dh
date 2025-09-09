@@ -1,0 +1,168 @@
+.\" l2dhd(8) — Layer-2 DH responder
+.TH L2DHD 8 "September 2025" "l2dhd" "System Administration Utilities"
+.SH NAME
+l2dhd \- Layer\-2 Diffie\-Hellman responder (X448 key exchange, Ed25519 auth)
+.SH SYNOPSIS
+.B l2dhd
+.B -i
+.I IFACE
+.B --my-ed25519-priv
+.I HEX32
+.B --peer-ed25519-pub
+.I HEX32
+.RI [ options ]
+.PP
+.B l2dhd
+.B -c
+.I FILE
+.RI [ options ]
+.SH DESCRIPTION
+.B l2dhd
+is a Layer\-2 (Ethernet) authenticated Diffie\-Hellman responder. It completes a one\-RTT handshake with an initiator
+(\fBl2dhc\fR) to agree on a session key derived via X448 (ECDH) and authenticated with Ed25519. Frames are sent directly over
+Ethernet using a configurable EtherType (default \fB0x88b5\fR), without VLAN support (cBPF filter matches non\-VLAN frames only).
+.PP
+By default \fBl2dhd\fR is
+.B one\-shot
+: it exits after a successful handshake (printing the key). Use
+.BR --loop
+to keep serving multiple sessions. The program is robust to dropped / duplicated frames and will abandon a half\-open session if a fresh valid HELLO arrives or configured limits are reached. An optional LRU cache can suppress recent replays.
+.SH KEY GENERATION (Ed25519)
+This program requires:
+.IP \(bu 2
+your \fBEd25519 private key\fR as \fB32 bytes of hex\fR for \fB--my-ed25519-priv\fR, and
+.IP \(bu
+your peer's \fBEd25519 public key\fR as \fB32 bytes of hex\fR for \fB--peer-ed25519-pub\fR.
+.PP
+Generate a keypair with OpenSSL and extract the exact values:
+.PP
+.nf
+# 1) Create a private key (PKCS#8 PEM)
+openssl genpkey -algorithm ed25519 -out ed25519.pem
+
+# 2) Show both keys in hex (human-readable)
+openssl pkey -in ed25519.pem -text -noout
+#   Copy the 32-byte "priv:" hex (without colons) as --my-ed25519-priv
+#   Copy the 32-byte "pub:"  hex (without colons) to share as your public key
+
+# (Optional) Robust one-liners to capture clean hex strings:
+MY_PRIV_HEX=$(openssl pkey -in ed25519.pem -text -noout \
+  | awk '/priv:/{f=1;next}/pub:/{f=0}f' | tr -d ':\n[:space:]')
+MY_PUB_HEX=$(openssl pkey -in ed25519.pem -text -noout \
+  | awk '/pub:/{f=1;next}f' | tr -d ':\n[:space:]')
+
+# Sanity: both should be exactly 64 hex chars
+printf '%s\n%s\n' "$MY_PRIV_HEX" "$MY_PUB_HEX" | awk '{print length,$0}'
+.fi
+.PP
+Alternatively, derive the public key directly from the PEM in a format\-agnostic way:
+.PP
+.nf
+MY_PUB_HEX=$(openssl pkey -in ed25519.pem -pubout -outform DER \
+  | tail -c 32 | hexdump -v -e '/1 "%02x"')
+.fi
+.PP
+Exchange the \fBpublic key hex\fR with your peer. Keep the \fBprivate key hex\fR secret.
+.SH OPTIONS
+.TP
+.BR -i " " \fIIFACE\fR
+Interface to bind for RX/TX (e.g., \fBeth0\fR).
+.TP
+.BR -s " " \fIMAC\fR
+Override source MAC address (default: interface MAC).
+.TP
+.BR -y " " \fIHEX\fR
+EtherType in hex (default \fB88b5\fR).
+.TP
+.B --promisc
+Enable promiscuous mode on RX socket.
+.TP
+.B --no-bpf
+Disable the non\-VLAN EtherType cBPF filter.
+.TP
+.BR --retry-ms " " \fIMS\fR
+Resend interval for \fBFINISH(R)\fR while awaiting \fBFINISH(I)\fR (default 1000).
+.TP
+.BR --timeout " " \fISEC\fR
+Wait timeout while idle for \fBHELLO(I)\fR and (if set) overall handshake deadline. Negative (default) means infinite wait in IDLE and no global deadline during a handshake.
+.TP
+.B --raw
+Print only the key (hex), optionally prefixed by \fBID:\fR if an identifier is present; no banners.
+.TP
+.BR --separate " " \fIN\fR
+Insert \fB:\fR every \fIN\fR hex characters when printing the key (e.g., \fI2, 4, 8\fR). Also influences formatting of hook env (see \fB--exec\fR).
+.TP
+.BR --my-ed25519-priv " " \fIHEX32\fR
+Responder Ed25519 private key (32 bytes, hex).
+.TP
+.BR --peer-ed25519-pub " " \fIHEX32\fR
+Pinned initiator Ed25519 public key (32 bytes, hex).
+.TP
+.BR --max-resends " " \fIN\fR
+Maximum number of \fBFINISH(R)\fR resends before abandoning (default 10, \-1 = unlimited).
+.TP
+.BR --replay-window-sec " " \fIS\fR
+Enable LRU anti\-replay window of \fIS\fR seconds for recently seen HELLO tuples (edpub+x448_pub+nonce). Default 30; 0 disables.
+.TP
+.B --loop
+Serve multiple sessions (do not exit after success).
+.TP
+.BR --exec " " \fI"cmd"\fR
+Execute shell command after each successful handshake (env only; same privileges). See ENVIRONMENT in OUTPUT for variables.
+.TP
+.BR -c " " \fIFILE\fR
+Read config file of \fIkey=value\fR pairs. CLI options override. Recognized keys mirror the long options: \fIifname, src_mac, ethertype, promisc, no_bpf, retry_ms, timeout, raw, separate, my_ed25519_priv, peer_ed25519_pub, max_resends, replay_window_sec, loop, exec\fR.
+.TP
+.BR -q
+Be quiet except for output of hook.
+.TP
+.BR -v " | " -vv
+Increase verbosity (debug / very verbose with dumps).
+.SH OUTPUT
+In default mode it prints a banner, the optional identifier, the session key in hex (optionally separated) and base64, and a fingerprint (first 8 bytes of SHA\-256(key)). With \fB--raw\fR it prints only the (possibly \fBID:\fR prefixed) hex key.
+.PP
+If \fB--exec\fR is used, the command receives:
+.RS
+.IP \(bu 2
+\fBL2DH_ID\fR, \fBL2DH_LEN\fR, \fBL2DH_KEY_HEX\fR, \fBL2DH_KEY_B64\fR, \fBL2DH_FP8\fR, \fBL2DH_PEER_MAC\fR
+.IP \(bu
+(when \fB--separate N\fR) \fBL2DH_KEY_HEX_GROUPED\fR, \fBL2DH_KEY_HEX_COUNT\fR, \fBL2DH_KEY_HEX_1..COUNT\fR
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Successful handshake (and hook executed). In \fB--loop\fR mode the process does not exit on success.
+.TP
+.B 1
+Generic error (sockets, crypto, parameters, OOM).
+.TP
+.B 2
+Timeout waiting for \fBHELLO(I)\fR (only when \fB--timeout\fR is set while idle in one\-shot mode).
+.SH EXAMPLES
+.PP
+One\-shot, print key:
+.RS
+.nf
+sudo l2dhd -i lan0 \\
+  --my-ed25519-priv "$MY_PRIV_HEX" --peer-ed25519-pub "$PEER_PUB_HEX"
+.fi
+.RE
+.PP
+Daemon style, with hook and grouped hex:
+.RS
+.nf
+sudo l2dhd -i lan0 --loop --separate 8 \\
+  --my-ed25519-priv "$MY_PRIV_HEX" --peer-ed25519-pub "$PEER_PUB_HEX" \\
+  --exec '/usr/local/bin/use_key.sh' -v
+.fi
+.RE
+.SH SECURITY
+Keys are printed to stdout unless \fB--raw\fR or \fB--exec\fR handling is used carefully. Protect stdout logs and shell history. The \fB--exec\fR hook runs with responder privileges; ensure the script path and contents are trusted. Anti\-replay is best applied \fIafter\fR successful sessions to avoid suppressing legitimate initiator retries.
+.SH FILES
+Config file as provided via \fB-c\fR (free\-form \fIkey=value\fR).
+.SH SEE ALSO
+.BR l2dhc (8)
+.SH AUTHOR
+You (project author). Manual page prepared by request.
+.SH BUGS
+Non\-VLAN only. Report issues to your project tracker.

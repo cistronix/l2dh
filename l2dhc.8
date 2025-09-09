@@ -1,0 +1,148 @@
+.\" l2dhc(8) — Layer-2 DH initiator
+.TH L2DHC 8 "September 2025" "l2dhc" "System Administration Utilities"
+.SH NAME
+l2dhc \- Layer\-2 Diffie\-Hellman initiator (X448 key exchange, Ed25519 auth)
+.SH SYNOPSIS
+.B l2dhc
+.B -i
+.I IFACE
+.B -d
+.I DEST_MAC
+.B --my-ed25519-priv
+.I HEX32
+.B --peer-ed25519-pub
+.I HEX32
+.RI [ options ]
+.PP
+.B l2dhc
+.B -c
+.I FILE
+.RI [ options ]
+.SH DESCRIPTION
+.B l2dhc
+is the initiator for an authenticated Diffie\-Hellman handshake across raw Ethernet. It sends \fBHELLO(I)\fR frames containing an X448 ephemeral public key, nonce, optional identifier, and signature (Ed25519). It retransmits \fBHELLO(I)\fR and \fBFINISH(I)\fR at \fI--retry-ms\fR until it receives the responder's messages or the overall timeout expires. The initiator is \fBalways one\-shot\fR: it exits after success or error.
+.PP
+The initiator chooses the derived key length (\fB--keylen\fR). An optional time request (\fB-t\fR) asks the responder to return its wall clock time, which the initiator can apply with \fBclock_settime(2)\fR.
+.SH KEY GENERATION (Ed25519)
+Both peers need their own Ed25519 keypair. Each program takes keys as \fB32\-byte hex\fR strings:
+.IP \(bu 2
+\fB--my-ed25519-priv\fR expects your private key (hex),
+.IP \(bu
+\fB--peer-ed25519-pub\fR expects the other side's public key (hex).
+.PP
+Create a keypair with OpenSSL and extract 32\-byte hex values:
+.PP
+.nf
+# 1) Create a private key (PKCS#8 PEM)
+openssl genpkey -algorithm ed25519 -out ed25519.pem
+
+# 2) Show both keys in hex (human-readable)
+openssl pkey -in ed25519.pem -text -noout
+#   Copy 32-byte "priv:" as --my-ed25519-priv
+#   Copy 32-byte "pub:"  to share as your public key
+
+# One-liners to capture clean hex:
+MY_PRIV_HEX=$(openssl pkey -in ed25519.pem -text -noout \
+  | awk '/priv:/{f=1;next}/pub:/{f=0}f' | tr -d ':\n[:space:]')
+MY_PUB_HEX=$(openssl pkey -in ed25519.pem -text -noout \
+  | awk '/pub:/{f=1;next}f' | tr -d ':\n[:space:]')
+
+# Alternative public derivation from PEM:
+MY_PUB_HEX=$(openssl pkey -in ed25519.pem -pubout -outform DER \
+  | tail -c 32 | hexdump -v -e '/1 "%02x"')
+.fi
+.PP
+Exchange public keys out of band and pin them with \fB--peer-ed25519-pub\fR on each side.
+.SH OPTIONS
+.TP
+.BR -i " " \fIIFACE\fR
+Interface to bind for RX/TX (e.g., \fBeth0\fR).
+.TP
+.BR -d " " \fIMAC\fR
+Destination MAC of the responder.
+.TP
+.BR -s " " \fIMAC\fR
+Override source MAC address (default: interface MAC).
+.TP
+.BR -y " " \fIHEX\fR
+EtherType in hex (default \fB88b5\fR).
+.TP
+.B --promisc
+Enable promiscuous mode on RX socket (normally not needed).
+.TP
+.BR --retry-ms " " \fIMS\fR
+Resend interval for \fBHELLO(I)\fR and \fBFINISH(I)\fR (default 1000, min 100).
+.TP
+.BR --timeout " " \fISEC\fR
+Overall handshake timeout (default 20).
+.TP
+.B --raw
+Print only the key (hex); no banners.
+.TP
+.BR --separate " " \fIN\fR
+Insert \fB:\fR every \fIN\fR hex characters when printing the key.
+.TP
+.BR --keylen " " \fIN\fR
+Derived key length in bytes (default 32; min 16; max 4096).
+.TP
+.BR --identifier " " \fISTR\fR
+Optional ASCII identifier (\<=32 bytes). Echoed by the responder; printed on both sides.
+.TP
+.B -t
+Request time from responder and set system clock (requires privilege).
+.TP
+.BR --my-ed25519-priv " " \fIHEX32\fR
+Initiator Ed25519 private key (32 bytes, hex).
+.TP
+.BR --peer-ed25519-pub " " \fIHEX32\fR
+Pinned responder Ed25519 public key (32 bytes, hex).
+.TP
+.BR -c " " \fIFILE\fR
+Read config file of \fIkey=value\fR pairs. CLI options override. Recognized keys: \fIifname, dest_mac, src_mac, ethertype, promisc, retry_ms, timeout, raw, separate, identifier, keylen, time, my_ed25519_priv, peer_ed25519_pub\fR.
+.TP
+.BR -v " | " -vv
+Increase verbosity (debug / very verbose with dumps).
+.SH OUTPUT
+On success prints either a banner with identifier, key (hex and base64), and fingerprint (first eight bytes of SHA\-256(key)), or only the hex key in \fB--raw\fR mode. The hex can be grouped with \fB--separate N\fR.
+.SH EXIT STATUS
+.TP
+.B 0
+Successful handshake.
+.TP
+.B 1
+Generic error (sockets, crypto, parameters, OOM).
+.TP
+.B 2
+Timeout waiting for \fBHELLO(R)\fR.
+.TP
+.B 3
+Timeout waiting for \fBFINISH(R)\fR.
+.SH EXAMPLES
+.PP
+Initiate a 64\-byte key exchange with identifier and time request:
+.RS
+.nf
+sudo l2dhc -i lan0 -d aa:bb:cc:dd:ee:ff \\
+  --my-ed25519-priv "$MY_PRIV_HEX" --peer-ed25519-pub "$PEER_PUB_HEX" \\
+  --keylen 64 --identifier node42 -t -v
+.fi
+.RE
+.PP
+Produce raw hex only, grouped every 8 hex chars:
+.RS
+.nf
+sudo l2dhc -i lan0 -d AA:BB:CC:DD:EE:FF \\
+  --my-ed25519-priv "$MY_PRIV_HEX" --peer-ed25519-pub "$PEER_PUB_HEX" \\
+  --separate 8 --raw
+.fi
+.RE
+.SH SECURITY
+Both peers authenticate via Ed25519 using pinned public keys. Protect the private keys and command histories. The \fB-t\fR option sets system time; use with care. Outputting keys to stdout may expose secrets in logs unless handled deliberately (e.g., piping into a secure consumer).
+.SH FILES
+Config file as provided via \fB-c\fR (free\-form \fIkey=value\fR).
+.SH SEE ALSO
+.BR l2dhd (8)
+.SH AUTHOR
+You (project author). Manual page prepared by request.
+.SH BUGS
+Non\-VLAN only (BPF match at EtherType offset 12). Report issues to your project tracker.
