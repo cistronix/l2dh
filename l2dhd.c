@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <signal.h>
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
 #include <linux/filter.h>
@@ -30,6 +31,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -283,6 +285,22 @@ static void print_hex_grouped(const unsigned char *b,size_t n,int group){
   for(size_t i=0;i<L;i++){ putchar(hex[i]); if(((int)((i+1)%group))==0 && i+1<L) putchar(':'); } free(hex);
 }
 static char *b64(const unsigned char *in,size_t inlen){ size_t outlen=4*((inlen+2)/3); unsigned char *out=OPENSSL_malloc(outlen+1); if(!out) return NULL; int n=EVP_EncodeBlock(out,in,(int)inlen); if(n<0){OPENSSL_free(out);return NULL;} out[n]='\0'; return (char*)out; }
+// ---------- child reaper ----------
+static void reap_children(int sig){
+  (void)sig;
+  int saved = errno;
+  // Reap all exited children without blocking
+  while (waitpid(-1, NULL, WNOHANG) > 0) { /* no-op */ }
+  errno = saved;
+}
+static void setup_sigchld_reaper(void){
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = reap_children;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+  sigaction(SIGCHLD, &sa, NULL);
+}
 
 // ---------- exec hook helpers ----------
 static void mac_to_str(const unsigned char mac[ETH_ALEN], char out[18]){
@@ -441,6 +459,9 @@ int main(int argc,char **argv){
   }
 
   if(!cfg.ifname || !cfg.have_my_priv || !cfg.have_peer_pub){ fprintf(stderr,"Missing required args\n"); return 1; }
+
+  // Ensure any forked hook children are reaped (prevents zombies)
+  setup_sigchld_reaper();
 
   int ifindex=0, mtu=0; unsigned char smac[ETH_ALEN];
   int rx_fd=open_rx(&cfg,&ifindex,&mtu,smac); if(rx_fd<0) return 1;
